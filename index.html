@@ -71,7 +71,7 @@ function add(m){
 }
 function busy(b,w){st.textContent=b?((w&&w.length?w.join('、'):agent)+' 在说…'):'在线';stopB.hidden=!b}
 async function load(){
-  const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});busy(j.busy,j.who);log.scrollTop=log.scrollHeight;
+  const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});(j.streaming||[]).forEach(x=>{const d=add({id:x.id,who:x.who,text:x.text});live[x.id]={d,t:x.text};d.querySelector('.b').classList.add('cur')});busy(j.busy,j.who);log.scrollTop=log.scrollHeight;
 }
 let es=null,retry=0,rtimer=null;
 function reconnect(){if(rtimer)return;const w=Math.min(15000,1000*2**retry++);st.textContent='重连中…';

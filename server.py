@@ -290,12 +290,50 @@ async def key_say(key: str, text: str = ""):
 
 @app.get("/history")
 async def history(req: Request):
-    return JSONResponse({"me": who(req), "msgs": load()[-300:], "busy": bool(busy_names()), "who": busy_names(), "agent": AGENT, "title": CFG.get("title", "room")})
+    return JSONResponse({"me": who(req), "msgs": load()[-300:], "busy": bool(busy_names()), "who": busy_names(), "streaming": [{"id": k, "who": v["who"], "text": v["text"]} for k, v in STREAMS.items()], "agent": AGENT, "title": CFG.get("title", "room")})
+
+
+STREAMS: dict[str, dict] = {}   # 外部发言人的流式发言：id → {who, text, seq}
+
+
+async def stream_chunk(who_name, body):
+    """可选流式：{"id", "seq": 0,1,2…, "delta": "…", "more": true/false}。
+    seq 不大于已收到的就忽略（重试不重复追加）；more=false 才落成一条完整消息并叫醒 agent；断流就一直挂着。"""
+    sid = str(body.get("id") or "")
+    if not sid.isalnum() or len(sid) > 24 or sid in seen_ids:
+        return JSONResponse({"ok": False, "err": "bad or used id"}, status_code=400)
+    seq = int(body.get("seq", 0))
+    st = STREAMS.get(sid)
+    if st is None:
+        st = STREAMS[sid] = {"who": who_name, "text": "", "seq": -1, "ts": time.strftime("%H:%M")}
+        await push({"type": "start", "id": sid, "who": who_name})
+    if st["who"] != who_name:
+        return JSONResponse({"ok": False, "err": "not yours"}, status_code=403)
+    if seq > st["seq"]:
+        st["seq"] = seq
+        d = str(body.get("delta") or "")
+        if d:
+            st["text"] += d
+            await push({"type": "delta", "id": sid, "t": d})
+    if body.get("more") is False:
+        STREAMS.pop(sid, None)
+        seen_ids.add(sid)
+        m = {"id": sid, "who": who_name, "text": st["text"].strip(), "ts": st["ts"]}
+        if not m["text"]:
+            await push({"type": "drop", "id": sid})
+            return {"ok": True, "done": True, "empty": True}
+        save(m)
+        await push({"type": "done", **m})
+        dispatch(m)
+        return {"ok": True, "done": True}
+    return {"ok": True, "seq": st["seq"]}
 
 
 @app.post("/send")
 async def send(req: Request):
     body = await req.json()
+    if "delta" in body:
+        return await stream_chunk(who(req), body)
     t = (body.get("text") or "").strip()
     if not t:
         return {"ok": False}
