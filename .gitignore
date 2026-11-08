@@ -1,0 +1,7 @@
+room.jsonl
+session.txt
+config.json
+people.md
+uploads/
+__pycache__/
+*.bak*

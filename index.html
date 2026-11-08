@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>room</title>
+<style>
+:root{--bg:#f4f5f2;--card:#fff;--ink:#1d2320;--mute:#78807b;--me:#2f6f5e;--meink:#fff;--ag:#fff;--line:#e2e5e0;--acc:#2f6f5e}
+@media (prefers-color-scheme:dark){:root{--bg:#121513;--card:#1b201d;--ink:#e6ebe7;--mute:#8b948e;--me:#2f6f5e;--ag:#1e2421;--line:#2a312d}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column}
+header{padding:10px 16px calc(10px);padding-top:calc(10px + env(safe-area-inset-top,0px));border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;background:var(--card)}
+header b{font-size:17px}header .st{font-size:13px;color:var(--mute);margin-left:auto}
+#log{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.m{max-width:min(720px,92%);display:flex;flex-direction:column;gap:3px}
+.m .w{font-size:12px;color:var(--mute)}
+.m .b{padding:9px 13px;border-radius:14px;background:var(--ag);border:1px solid var(--line);white-space:normal;word-wrap:break-word;overflow-wrap:anywhere}
+.m.me{align-self:flex-end;align-items:flex-end}.m.me .b{background:var(--me);color:var(--meink);border-color:transparent}
+.m .b p{margin:0 0 .5em}.m .b p:last-child{margin:0}
+.m .b pre{background:rgba(127,127,127,.12);padding:8px;border-radius:8px;overflow-x:auto;font-size:13px;margin:.4em 0}
+.m .b code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}
+.m .b img{max-width:100%;border-radius:8px;display:block;margin:.3em 0}
+.m.pend{opacity:.55}
+.m .b img{cursor:zoom-in;max-height:60vh}
+#att{display:flex;gap:6px;padding:6px 16px 0;background:var(--card);flex-wrap:wrap}#att:empty{display:none}
+#att span{position:relative}#att i{display:block;height:56px;line-height:56px;padding:0 10px;border:1px solid var(--line);border-radius:6px;font-style:normal;font-size:13px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.m .b a.fl{display:inline-block;padding:4px 10px;border:1px solid var(--line);border-radius:8px;margin:2px 0;text-decoration:none}
+#att img{height:56px;border-radius:6px;display:block}#att span.up img{opacity:.4}
+#att b{position:absolute;top:-6px;right:-6px;background:#a4473b;color:#fff;border-radius:50%;width:18px;height:18px;font:12px/18px sans-serif;text-align:center;cursor:pointer}
+button.pic{background:transparent;color:var(--ink);border:1px solid var(--line);padding:0 10px;font-size:18px}
+.tool{font-size:12px;color:var(--mute);margin:2px 0}
+.tool summary{cursor:pointer;list-style:none}.tool summary::-webkit-details-marker{display:none}
+.tool summary::before{content:"▸ "}.tool[open] summary::before{content:"▾ "}
+.tool pre{background:rgba(127,127,127,.12);padding:6px 8px;border-radius:6px;overflow-x:auto;max-height:50vh;overflow-y:auto;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--ink);margin:3px 0;white-space:pre-wrap;word-break:break-all}
+.tool pre.o{opacity:.85}
+.cur::after{content:"▍";animation:bl 1s steps(1) infinite;color:var(--acc)}@keyframes bl{50%{opacity:0}}
+footer{display:flex;gap:8px;padding:10px 16px;padding-bottom:calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line);background:var(--card)}
+textarea{flex:1;resize:none;border:1px solid var(--line);border-radius:12px;padding:9px 12px;font:inherit;background:var(--bg);color:var(--ink);max-height:40vh}
+button{border:0;border-radius:12px;padding:0 16px;font:inherit;background:var(--acc);color:#fff}
+button.stop{background:#a4473b}
+</style></head><body>
+<header><b id="ttl">room</b><span class="st" id="st">连接中…</span></header>
+<div id="log"></div>
+<div id="att"></div><footer><button id="pic" class="pic" title="上传文件">📎</button><input id="file" type="file" multiple hidden><textarea id="tx" rows="1" placeholder="说点什么… (Enter 发送，Shift+Enter 换行)"></textarea><button id="go">发送</button><button id="stop" class="stop" hidden>停</button></footer>
+<script>
+const log=document.getElementById('log'),tx=document.getElementById('tx'),st=document.getElementById('st'),stopB=document.getElementById('stop');
+let me='',agent='agent',live={};
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function md(s){
+  const parts=s.split(/```/);
+  return parts.map((p,i)=>{
+    if(i%2) return '<pre><code>'+esc(p.replace(/^\w*\n/,''))+'</code></pre>';
+    let h=esc(p).replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>')
+      .replace(/!\[([^\]\n]*)\]\(((?:https?:\/\/|\/|img\/)[^\s)<]+)\)/g,(m,a,u)=>'<img src="'+u+'" alt="'+a+'">')
+      .replace(/\[([^\]\n]+)\]\((file\/[0-9a-f]{16}\/[^\s)<]+)\)/g,'<a class="fl" href="$2" target="_blank">$1</a>')
+      .replace(/(^|[^"=])(https?:\/\/[^\s<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    return h.split(/\n{2,}/).map(x=>x.trim()?'<p>'+x.replace(/\n/g,'<br>')+'</p>':'').join('');
+  }).join('');
+}
+function toolEl(t){const d=document.createElement('details');d.className='tool';if(t.tid)d.id='t'+t.tid;
+  d.innerHTML='<summary></summary><pre class="i"></pre><pre class="o"></pre>';fillTool(d,t);return d}
+function fillTool(d,t){if(t.name!==undefined)d.dataset.name=t.name;if(t.desc)d.dataset.desc=t.desc;
+  d.querySelector('summary').textContent='⚙ '+(d.dataset.name||'')+(d.dataset.desc?' · '+d.dataset.desc:'');
+  const i=d.querySelector('.i'),o=d.querySelector('.o');
+  if(t.input!==undefined)i.textContent=t.input;if(t.out!==undefined)o.textContent=t.out;
+  i.hidden=!i.textContent;o.hidden=!o.textContent}
+function near(){return log.scrollHeight-log.scrollTop-log.clientHeight<120}
+function add(m){
+  const d=document.createElement('div');d.className='m'+(m.who===me?' me':'');d.id='m'+m.id;
+  d.innerHTML='<div class="w">'+esc(m.who)+(m.ts?' · '+m.ts:'')+'</div><div class="b">'+md(m.text||'')+'</div>';
+  (m.tools||[]).forEach(t=>d.insertBefore(toolEl(t),d.querySelector('.b')));
+  const s=near();log.appendChild(d);if(s)log.scrollTop=log.scrollHeight;return d;
+}
+function busy(b){st.textContent=b?agent+' 在说…':'在线';stopB.hidden=!b}
+async function load(){
+  const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});busy(j.busy);log.scrollTop=log.scrollHeight;
+}
+function connect(){
+  const es=new EventSource('events');
+  es.onopen=()=>{load()};
+  es.onerror=()=>{st.textContent='重连中…'};
+  es.onmessage=e=>{
+    const ev=JSON.parse(e.data);
+    if(ev.type==='msg'){if(!document.getElementById('m'+ev.id))add(ev);else markSent(ev.id)}
+    else if(ev.type==='start'){const d=add({id:ev.id,who:ev.who,text:''});live[ev.id]={d,t:''};d.querySelector('.b').classList.add('cur')}
+    else if(ev.type==='delta'){const L=live[ev.id];if(!L)return;L.t+=ev.t;const s=near();const b=L.d.querySelector('.b');b.innerHTML=md(L.t);b.classList.add('cur');if(s)log.scrollTop=log.scrollHeight}
+    else if(ev.type==='tool'){const L=live[ev.id];if(!L)return;L.d.insertBefore(toolEl({tid:ev.tid,name:ev.name}),L.d.querySelector('.b'))}
+    else if(ev.type==='tool_in'||ev.type==='tool_out'){const d=document.getElementById('t'+ev.tid);if(d)fillTool(d,ev)}
+    else if(ev.type==='done'){const L=live[ev.id];if(L){const b=L.d.querySelector('.b');b.classList.remove('cur');b.innerHTML=md(ev.text)}else add(ev);delete live[ev.id]}
+    else if(ev.type==='drop'){const L=live[ev.id];if(L)L.d.remove();delete live[ev.id]}
+    else if(ev.type==='state')busy(ev.busy);
+  };
+}
+const att=document.getElementById('att'),fileI=document.getElementById('file');let atts=[];
+function shrink(f){return new Promise((res,rej)=>{if(f.type==='image/gif'){const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(f);return}
+  const u=URL.createObjectURL(f),im=new Image();im.onload=()=>{const k=Math.min(1,1600/Math.max(im.width,im.height));const c=document.createElement('canvas');
+  c.width=Math.round(im.width*k);c.height=Math.round(im.height*k);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(u);res(c.toDataURL('image/jpeg',.85))};im.onerror=rej;im.src=u})}
+async function addFile(f){if(!f)return;const isImg=/^image\/(jpeg|png|webp|gif)$/.test(f.type);
+  if(f.size>30*1024*1024&&!isImg){st.textContent='文件超过 30MB：'+f.name;return}
+  const a={url:null,img:isImg,name:f.name};atts.push(a);const sp=document.createElement('span');sp.className='up';
+  sp.innerHTML=(isImg?'<img>':'<i></i>')+'<b>×</b>';if(!isImg)sp.querySelector('i').textContent='📄 '+f.name;att.appendChild(sp);
+  sp.querySelector('b').onclick=()=>{atts=atts.filter(x=>x!==a);sp.remove()};
+  try{const data=isImg?await shrink(f):await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(f)});
+    if(isImg)sp.querySelector('img').src=data;
+    for(let i=0;i<3&&!a.url;i++){try{const r=await fetch('upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data,name:f.name,kind:isImg?'image':'file'})});const j=await r.json();if(j.ok)a.url=j.url;else break}catch(e){await new Promise(r=>setTimeout(r,1500))}}
+  }catch(e){}
+  if(a.url)sp.className='';else{sp.remove();atts=atts.filter(x=>x!==a);st.textContent='上传失败：'+f.name}}
+document.getElementById('pic').onclick=()=>fileI.click();
+fileI.onchange=()=>{[...fileI.files].forEach(addFile);fileI.value=''};
+tx.addEventListener('paste',e=>{const fs=[...(e.clipboardData||{}).items||[]].filter(i=>i.kind==='file').map(i=>i.getAsFile());if(fs.length){e.preventDefault();fs.forEach(addFile)}});
+log.addEventListener('click',e=>{if(e.target.tagName==='IMG')window.open(e.target.src,'_blank')});
+const sending={};
+function markSent(id){const d=document.getElementById('m'+id);if(d){d.classList.remove('pend');const w=d.querySelector('.w .ps');if(w)w.remove()}delete sending[id]}
+async function send(){if(atts.some(a=>!a.url)){st.textContent='文件还在上传…';return}
+  const t=[tx.value.trim(),...atts.map(a=>a.img?'![]('+a.url+')':'[📄 '+a.name.replace(/[\[\]]/g,'')+']('+a.url.split('/').slice(0,2).join('/')+'/'+encodeURIComponent(a.url.split('/').slice(2).join('/')).replace(/[()]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())+')')].filter(Boolean).join('\n');if(!t)return;atts=[];att.innerHTML='';
+  const id=Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+  const d=add({id,who:me,text:t,ts:''});d.classList.add('pend');d.querySelector('.w').insertAdjacentHTML('beforeend','<span class="ps"> 发送中…</span>');
+  sending[id]={t,d};log.scrollTop=log.scrollHeight;
+  tx.value='';tx.style.height='';localStorage.removeItem('room_draft');
+  for(let a=0;a<4;a++){
+    if(a)await new Promise(r=>setTimeout(r,1500*a));
+    if(!sending[id])return;
+    try{const c=new AbortController();const tm=setTimeout(()=>c.abort(),12000);
+      const r=await fetch('send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t,id}),signal:c.signal});
+      clearTimeout(tm);if(r.ok){markSent(id);return}}catch(e){}
+  }
+  d.remove();delete sending[id];
+  tx.value=t+(tx.value?'\n'+tx.value:'');localStorage.setItem('room_draft',tx.value);
+  st.textContent='发送失败，原文已放回输入框';
+}
+document.getElementById('go').onclick=send;stopB.onclick=()=>fetch('stop',{method:'POST'});
+tx.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send()}});
+tx.value=localStorage.getItem('room_draft')||'';
+tx.addEventListener('input',()=>{localStorage.setItem('room_draft',tx.value);tx.style.height='auto';tx.style.height=tx.scrollHeight+'px'});
+connect();
+</script></body></html>
