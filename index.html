@@ -73,10 +73,15 @@ function busy(b){st.textContent=b?agent+' 在说…':'在线';stopB.hidden=!b}
 async function load(){
   const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});busy(j.busy);log.scrollTop=log.scrollHeight;
 }
+let es=null,retry=0,rtimer=null;
+function reconnect(){if(rtimer)return;const w=Math.min(15000,1000*2**retry++);st.textContent='重连中…';
+  rtimer=setTimeout(()=>{rtimer=null;connect()},w)}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&(!es||es.readyState===2)){retry=0;clearTimeout(rtimer);rtimer=null;connect()}});
 function connect(){
-  const es=new EventSource('events');
-  es.onopen=()=>{load()};
-  es.onerror=()=>{st.textContent='重连中…'};
+  if(es)try{es.close()}catch(e){}
+  es=new EventSource('events');
+  es.onopen=()=>{retry=0;load()};
+  es.onerror=()=>{st.textContent='重连中…';if(es.readyState===2)reconnect()};
   es.onmessage=e=>{
     const ev=JSON.parse(e.data);
     if(ev.type==='msg'){if(!document.getElementById('m'+ev.id))add(ev);else markSent(ev.id)}
