@@ -69,9 +69,9 @@ function add(m){
   (m.tools||[]).forEach(t=>d.insertBefore(toolEl(t),d.querySelector('.b')));
   const s=near();log.appendChild(d);if(s)log.scrollTop=log.scrollHeight;return d;
 }
-function busy(b){st.textContent=b?agent+' 在说…':'在线';stopB.hidden=!b}
+function busy(b,w){st.textContent=b?((w&&w.length?w.join('、'):agent)+' 在说…'):'在线';stopB.hidden=!b}
 async function load(){
-  const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});busy(j.busy);log.scrollTop=log.scrollHeight;
+  const r=await fetch('history');const j=await r.json();me=j.me;if(j.agent)agent=j.agent;if(j.title){document.title=j.title;document.getElementById('ttl').textContent=j.title}log.innerHTML='';j.msgs.forEach(add);Object.keys(sending).forEach(k=>{if(document.getElementById('m'+k))markSent(k);else log.appendChild(sending[k].d)});busy(j.busy,j.who);log.scrollTop=log.scrollHeight;
 }
 let es=null,retry=0,rtimer=null;
 function reconnect(){if(rtimer)return;const w=Math.min(15000,1000*2**retry++);st.textContent='重连中…';
@@ -91,7 +91,7 @@ function connect(){
     else if(ev.type==='tool_in'||ev.type==='tool_out'){const d=document.getElementById('t'+ev.tid);if(d)fillTool(d,ev)}
     else if(ev.type==='done'){const L=live[ev.id];if(L){const b=L.d.querySelector('.b');b.classList.remove('cur');b.innerHTML=md(ev.text)}else add(ev);delete live[ev.id]}
     else if(ev.type==='drop'){const L=live[ev.id];if(L)L.d.remove();delete live[ev.id]}
-    else if(ev.type==='state')busy(ev.busy);
+    else if(ev.type==='state')busy(ev.busy,ev.who);
   };
 }
 const att=document.getElementById('att'),fileI=document.getElementById('file');let atts=[];

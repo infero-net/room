@@ -4,7 +4,20 @@
   "alice": "Alice",
   "bob": "Bob"
  },
- "agent": "agent",
- "cwd": "~",
- "sys": "你在一个网页群聊里。每条消息前面标了说话人。叫醒你不等于必须回答：不需要你说话时就不输出任何文字。"
+ "agents": [
+  {
+   "name": "claude",
+   "kind": "claude",
+   "cwd": "~",
+   "sys": "你在一个网页群聊里。每条消息前面标了说话人。叫醒你不等于必须回答：不需要你说话时就不输出任何文字。",
+   "session": "session.txt"
+  },
+  {
+   "name": "codex",
+   "kind": "codex",
+   "cwd": "~",
+   "sys": "你在一个网页群聊里，名字叫 codex。每条消息前面标了说话人。不需要你说话时只回复 [沉默]。",
+   "session": "session_codex.txt"
+  }
+ ]
 }

@@ -21,17 +21,31 @@ FILE_RE = re.compile(r"\[[^\]\n]*\]\(file/([0-9a-f]{16})/([^\s)]+)\)")
 IMG_RE = re.compile(r"!\[[^\]\n]*\]\(img/([0-9a-f]{16}\.(?:jpg|png|webp|gif))\)")
 
 
-def sysprompt():
-    try:
-        return SYS + "\n\n" + open(os.path.join(D, "people.md"), encoding="utf-8").read()
-    except Exception:
-        return SYS
-
 app = FastAPI()
 subs: set[asyncio.Queue] = set()
-pending: list[dict] = []
-state = {"busy": False, "proc": None}
 seen_ids: set[str] = set()
+
+
+def _specs():
+    if CFG.get("agents"):
+        return CFG["agents"]
+    return [{"name": AGENT, "kind": "claude", "cwd": CFG.get("cwd", "~"), "sys": SYS, "session": "session.txt"}]
+
+
+# 本机 agent：每条消息（除了它自己说的）都会叫醒它，它自己决定说不说
+AGENTS = [{**x, "pending": [], "busy": False, "proc": None} for x in _specs()]
+
+
+def sysprompt(a):
+    s = a.get("sys", SYS)
+    try:
+        return s + "\n\n" + open(os.path.join(D, "people.md"), encoding="utf-8").read()
+    except Exception:
+        return s
+
+
+def busy_names():
+    return [a["name"] for a in AGENTS if a["busy"]]
 
 
 def load():
@@ -63,83 +77,149 @@ async def push(ev):
         q.put_nowait(ev)
 
 
-async def run_agent():
-    state["busy"] = True
-    await push({"type": "state", "busy": True})
+async def push_state():
+    await push({"type": "state", "busy": bool(busy_names()), "who": busy_names()})
+
+
+def dispatch(m):
+    for a in AGENTS:
+        if a["name"] != m["who"]:
+            a["pending"].append(m)
+            if not a["busy"]:
+                a["busy"] = True
+                asyncio.create_task(run_agent(a))
+
+
+def render(batch):
+    return "\n".join(f"【群聊】{m['who']}：" + FILE_RE.sub(lambda g: f"[文件：{os.path.join(UP, g.group(1), unquote(g.group(2)))}]",
+                     IMG_RE.sub(lambda g: f"[图片：{os.path.join(UP, g.group(1))}]", m['text'])) for m in batch)
+
+
+async def run_claude(a, prompt, sid, sf, mid):
+    args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
+            "--include-partial-messages", "--permission-mode", "bypassPermissions",
+            "--append-system-prompt", sysprompt(a)]
+    if sid:
+        args += ["--resume", sid]
+    else:
+        sid = str(uuid.uuid4())
+        args += ["--session-id", sid]
+        open(sf, "w").write(sid)
+    proc = await asyncio.create_subprocess_exec(*args, cwd=os.path.expanduser(a.get("cwd", "~")), stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL, limit=1 << 24)
+    a["proc"] = proc
+    text, tools = "", []
+    async for line in proc.stdout:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("type") == "stream_event":
+            ev = e.get("event", {})
+            if ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
+                t = ev["delta"]["text"]
+                text += t
+                await push({"type": "delta", "id": mid, "t": t})
+            elif ev.get("type") == "content_block_start" and ev.get("content_block", {}).get("type") == "tool_use":
+                cb = ev["content_block"]
+                tools.append({"tid": cb.get("id", ""), "name": cb.get("name", ""), "input": "", "out": ""})
+                await push({"type": "tool", "id": mid, "tid": cb.get("id", ""), "name": cb.get("name", "")})
+            elif ev.get("type") == "message_start" and text and not text.endswith("\n"):
+                text += "\n\n"
+                await push({"type": "delta", "id": mid, "t": "\n\n"})
+        elif e.get("type") == "assistant":
+            for c in e.get("message", {}).get("content", []) or []:
+                if c.get("type") == "tool_use":
+                    inp = c.get("input", {})
+                    s_in = clip(inp.get("command") if isinstance(inp, dict) and "command" in inp else json.dumps(inp, ensure_ascii=False, indent=1))
+                    desc = inp.get("description", "") if isinstance(inp, dict) else ""
+                    for t in tools:
+                        if t["tid"] == c.get("id"):
+                            t["input"], t["desc"] = s_in, desc
+                    await push({"type": "tool_in", "id": mid, "tid": c.get("id", ""), "input": s_in, "desc": desc})
+        elif e.get("type") == "user":
+            for c in e.get("message", {}).get("content", []) or []:
+                if isinstance(c, dict) and c.get("type") == "tool_result":
+                    r = c.get("content", "")
+                    if isinstance(r, list):
+                        r = "\n".join(x.get("text", "") for x in r if isinstance(x, dict))
+                    r = clip(str(r))
+                    for t in tools:
+                        if t["tid"] == c.get("tool_use_id"):
+                            t["out"] = r
+                    await push({"type": "tool_out", "id": mid, "tid": c.get("tool_use_id", ""), "out": r})
+    await proc.wait()
+    return text, tools
+
+
+async def run_codex(a, prompt, sid, sf, mid):
+    cwd = os.path.expanduser(a.get("cwd", "~"))
+    args = ["codex", "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", cwd]
+    args += ["resume", sid, prompt] if sid else [sysprompt(a) + "\n\n" + prompt]
+    proc = await asyncio.create_subprocess_exec(*args, cwd=cwd, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL, limit=1 << 24)
+    a["proc"] = proc
+    text, tools = "", []
+    async for line in proc.stdout:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        it = e.get("item") or {}
+        if e.get("type") == "thread.started" and not sid and e.get("thread_id"):
+            open(sf, "w").write(e["thread_id"])
+        elif it.get("type") == "command_execution" and e.get("type") == "item.started":
+            cmd = clip(it.get("command", ""))
+            tools.append({"tid": it.get("id", ""), "name": "shell", "input": cmd, "out": ""})
+            await push({"type": "tool", "id": mid, "tid": it.get("id", ""), "name": "shell"})
+            await push({"type": "tool_in", "id": mid, "tid": it.get("id", ""), "input": cmd, "desc": ""})
+        elif it.get("type") == "command_execution" and e.get("type") == "item.completed":
+            r = clip(it.get("aggregated_output") or "")
+            for t in tools:
+                if t["tid"] == it.get("id"):
+                    t["out"] = r
+            await push({"type": "tool_out", "id": mid, "tid": it.get("id", ""), "out": r})
+        elif it.get("type") == "agent_message" and e.get("type") == "item.completed":
+            t = (it.get("text") or "").strip()
+            if t:
+                t = ("\n\n" if text else "") + t
+                text += t
+                await push({"type": "delta", "id": mid, "t": t})
+    await proc.wait()
+    return text, tools
+
+
+async def run_agent(a):
+    a["busy"] = True
+    await push_state()
     try:
-        while pending:
-            batch = pending[:]
-            pending.clear()
-            prompt = "\n".join(f"【群聊】{m['who']}：" + FILE_RE.sub(lambda g: f"[文件：{os.path.join(UP, g.group(1), unquote(g.group(2)))}]", IMG_RE.sub(lambda g: f"[图片：{os.path.join(UP, g.group(1))}]", m['text'])) for m in batch)
-            sid = open(SESS).read().strip() if os.path.exists(SESS) else None
-            args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
-                    "--include-partial-messages", "--permission-mode", "bypassPermissions",
-                    "--append-system-prompt", sysprompt()]
-            if sid:
-                args += ["--resume", sid]
-            else:
-                sid = str(uuid.uuid4())
-                args += ["--session-id", sid]
-                open(SESS, "w").write(sid)
+        while a["pending"]:
+            batch = a["pending"][:]
+            a["pending"].clear()
+            sf = os.path.join(D, a.get("session") or f"session_{a['kind']}.txt")
+            sid = open(sf).read().strip() if os.path.exists(sf) else None
             mid = uuid.uuid4().hex[:12]
-            await push({"type": "start", "id": mid, "who": AGENT})
-            proc = await asyncio.create_subprocess_exec(*args, cwd=CWD, stdout=asyncio.subprocess.PIPE,
-                                                        stderr=asyncio.subprocess.DEVNULL, limit=1 << 24)
-            state["proc"] = proc
-            text = ""
-            tools = []
-            async for line in proc.stdout:
-                try:
-                    e = json.loads(line)
-                except Exception:
-                    continue
-                if e.get("type") == "stream_event":
-                    ev = e.get("event", {})
-                    if ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
-                        t = ev["delta"]["text"]
-                        text += t
-                        await push({"type": "delta", "id": mid, "t": t})
-                    elif ev.get("type") == "content_block_start" and ev.get("content_block", {}).get("type") == "tool_use":
-                        cb = ev["content_block"]
-                        tools.append({"tid": cb.get("id", ""), "name": cb.get("name", ""), "input": "", "out": ""})
-                        await push({"type": "tool", "id": mid, "tid": cb.get("id", ""), "name": cb.get("name", "")})
-                    elif ev.get("type") == "message_start" and text and not text.endswith("\n"):
-                        text += "\n\n"
-                        await push({"type": "delta", "id": mid, "t": "\n\n"})
-                elif e.get("type") == "assistant":
-                    for c in e.get("message", {}).get("content", []) or []:
-                        if c.get("type") == "tool_use":
-                            inp = c.get("input", {})
-                            s_in = inp.get("command") if isinstance(inp, dict) and "command" in inp else json.dumps(inp, ensure_ascii=False, indent=1)
-                            s_in = clip(s_in)
-                            for t in tools:
-                                if t["tid"] == c.get("id"):
-                                    t["input"] = s_in
-                                    t["desc"] = inp.get("description", "") if isinstance(inp, dict) else ""
-                            await push({"type": "tool_in", "id": mid, "tid": c.get("id", ""), "input": s_in,
-                                        "desc": inp.get("description", "") if isinstance(inp, dict) else ""})
-                elif e.get("type") == "user":
-                    for c in e.get("message", {}).get("content", []) or []:
-                        if isinstance(c, dict) and c.get("type") == "tool_result":
-                            r = c.get("content", "")
-                            if isinstance(r, list):
-                                r = "\n".join(x.get("text", "") for x in r if isinstance(x, dict))
-                            r = clip(str(r))
-                            for t in tools:
-                                if t["tid"] == c.get("tool_use_id"):
-                                    t["out"] = r
-                            await push({"type": "tool_out", "id": mid, "tid": c.get("tool_use_id", ""), "out": r})
-            await proc.wait()
-            state["proc"] = None
+            await push({"type": "start", "id": mid, "who": a["name"]})
+            try:
+                run = run_codex if a.get("kind") == "codex" else run_claude
+                text, tools = await run(a, render(batch), sid, sf, mid)
+            except Exception as ex:
+                text, tools = f"（{a['name']} 出错：{ex}）", []
+            a["proc"] = None
+            if text.strip() in ("[沉默]", "【沉默】", "[silent]"):
+                text = ""
             if not text.strip() and not tools:
-                await push({"type": "drop", "id": mid})   # 分身选择沉默：群里不留消息
+                await push({"type": "drop", "id": mid})   # 选择沉默：群里不留消息
                 continue
-            m = {"id": mid, "who": AGENT, "text": text.strip(), "ts": time.strftime("%H:%M"), "tools": tools}
+            m = {"id": mid, "who": a["name"], "text": text.strip(), "ts": time.strftime("%H:%M"), "tools": tools}
             save(m)
             await push({"type": "done", **m})
+            if text.strip():
+                dispatch(m)
     finally:
-        state["busy"] = False
-        await push({"type": "state", "busy": False})
+        a["busy"] = False
+        a["proc"] = None
+        await push_state()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -166,9 +246,7 @@ async def post_msg(who_name, t, cid=""):
     m = {"id": cid or uuid.uuid4().hex[:12], "who": who_name, "text": t, "ts": time.strftime("%H:%M")}
     save(m)
     await push({"type": "msg", **m})
-    pending.append(m)
-    if not state["busy"]:
-        asyncio.create_task(run_agent())
+    dispatch(m)
     return m
 
 
@@ -176,7 +254,7 @@ def key_text(key, n):
     base = f"https://cloud.infero.net/room/k/{key}"
     lines = [f"# room 群聊（你在这里的名字：{KEYS[key]}）",
              f"说话：打开 {base}/say?text=<URL 编码的文字>  （同一句别重复打开；想刷新看新消息就打开 {base}?n=30&t=<随便什么数> 防缓存）",
-             f"接入说明：{base}/readme", f"现在时间 {time.strftime('%m-%d %H:%M')}；千路分身{'正在回答' if state['busy'] else '空闲'}。", "", f"## 最近 {n} 条"]
+             f"接入说明：{base}/readme", f"现在时间 {time.strftime('%m-%d %H:%M')}；{('、'.join(busy_names()) + ' 正在回答') if busy_names() else '本机 agent 都空闲'}。", "", f"## 最近 {n} 条"]
     for m in load()[-n:]:
         lines.append(f"[{m.get('ts', '')}] {m['who']}：{m['text']}")
     return "\n".join(lines)
@@ -212,7 +290,7 @@ async def key_say(key: str, text: str = ""):
 
 @app.get("/history")
 async def history(req: Request):
-    return JSONResponse({"me": who(req), "msgs": load()[-300:], "busy": state["busy"], "agent": AGENT, "title": CFG.get("title", "room")})
+    return JSONResponse({"me": who(req), "msgs": load()[-300:], "busy": bool(busy_names()), "who": busy_names(), "agent": AGENT, "title": CFG.get("title", "room")})
 
 
 @app.post("/send")
@@ -231,9 +309,7 @@ async def send(req: Request):
         seen_ids.add(cid)
     save(m)
     await push({"type": "msg", **m})
-    pending.append(m)
-    if not state["busy"]:
-        asyncio.create_task(run_agent())
+    dispatch(m)
     return {"ok": True}
 
 
@@ -282,9 +358,10 @@ async def file_dl(fid: str, fn: str):
 
 @app.post("/stop")
 async def stop():
-    p = state.get("proc")
-    if p and p.returncode is None:
-        p.terminate()
+    for a in AGENTS:
+        p = a.get("proc")
+        if p and p.returncode is None:
+            p.terminate()
     return {"ok": True}
 
 
