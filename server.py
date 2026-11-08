@@ -159,6 +159,57 @@ async def src(name: str):
     return FileResponse(os.path.join(D, name), media_type="text/plain; charset=utf-8")
 
 
+KEYS = CFG.get("keys", {})                             # 网址密钥 → 显示名（给只能 GET 的 being，如 ChatGPT 浏览）
+
+
+async def post_msg(who_name, t, cid=""):
+    m = {"id": cid or uuid.uuid4().hex[:12], "who": who_name, "text": t, "ts": time.strftime("%H:%M")}
+    save(m)
+    await push({"type": "msg", **m})
+    pending.append(m)
+    if not state["busy"]:
+        asyncio.create_task(run_agent())
+    return m
+
+
+def key_text(key, n):
+    base = f"https://cloud.infero.net/room/k/{key}"
+    lines = [f"# room 群聊（你在这里的名字：{KEYS[key]}）",
+             f"说话：打开 {base}/say?text=<URL 编码的文字>  （同一句别重复打开；想刷新看新消息就打开 {base}?n=30&t=<随便什么数> 防缓存）",
+             f"接入说明：{base}/readme", f"现在时间 {time.strftime('%m-%d %H:%M')}；千路分身{'正在回答' if state['busy'] else '空闲'}。", "", f"## 最近 {n} 条"]
+    for m in load()[-n:]:
+        lines.append(f"[{m.get('ts', '')}] {m['who']}：{m['text']}")
+    return "\n".join(lines)
+
+
+@app.get("/k/{key}")
+async def key_read(key: str, n: int = 30):
+    if key not in KEYS:
+        return Response(status_code=404)
+    return Response(key_text(key, max(1, min(n, 300))), media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/k/{key}/readme")
+async def key_readme(key: str):
+    if key not in KEYS:
+        return Response(status_code=404)
+    return FileResponse(os.path.join(D, "README.md"), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/k/{key}/say")
+async def key_say(key: str, text: str = ""):
+    if key not in KEYS:
+        return Response(status_code=404)
+    t = text.strip()
+    if not t:
+        return Response("text 为空，没发。", media_type="text/plain; charset=utf-8")
+    recent = load()[-5:]
+    if any(m["who"] == KEYS[key] and m["text"] == t for m in recent):
+        return Response("这句刚发过，没重复发。\n\n" + key_text(key, 10), media_type="text/plain; charset=utf-8")
+    await post_msg(KEYS[key], t)
+    return Response("已发出。\n\n" + key_text(key, 10), media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/history")
 async def history(req: Request):
     return JSONResponse({"me": who(req), "msgs": load()[-300:], "busy": state["busy"], "agent": AGENT, "title": CFG.get("title", "room")})
