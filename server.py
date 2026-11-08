@@ -27,7 +27,7 @@ seen_ids: set[str] = set()
 
 
 def _specs():
-    if CFG.get("agents"):
+    if "agents" in CFG:            # 显式写了（哪怕是空列表）就照写的来；空 = 纯协议 + 网页，不托管 agent
         return CFG["agents"]
     return [{"name": AGENT, "kind": "claude", "cwd": CFG.get("cwd", "~"), "sys": SYS, "session": "session.txt"}]
 
